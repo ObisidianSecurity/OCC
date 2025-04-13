@@ -1,0 +1,301 @@
+#!/bin/bash
+
+# Obsidian Command Chain – Unified B-52 Workflow (Drone → Spear → Vanisher)
+# Author: Obsidian Security
+
+### PHASE 0: MISSION SETUP ###
+read -p "[?] Target IP or Host: " TARGET
+read -p "[?] Choose mode: --stealth or --aggressive: " MODE
+
+if [[ "$MODE" != "--stealth" && "$MODE" != "--aggressive" ]]; then
+    echo "[-] Invalid mode. Use --stealth or --aggressive"
+    exit 1
+fi
+
+RAND_ID=$(openssl rand -hex 2)
+TIMESTAMP=$(date +%Y%m%d_%H%M)
+OPID="OP-OBSIDIAN-${TIMESTAMP}-${RAND_ID}"
+
+BASE_DIR="ops/$OPID"
+RECON_DIR="$BASE_DIR/recon"
+EXPLOIT_DIR="$RECON_DIR/exploits"
+VANISH_DIR="$BASE_DIR/vanish"
+
+mkdir -p "$RECON_DIR" "$EXPLOIT_DIR" "$VANISH_DIR"
+echo "$OPID" > "$BASE_DIR/opid.txt"
+
+echo "[*] Operation ID: $OPID"
+echo "[*] Output Directory: $BASE_DIR"
+echo "------------------------------------------------------------"
+
+
+### PHASE 1: OBSIDIAN DRONE (Recon) ###
+echo "[+] PHASE 1: Obsidian Drone Recon Initiated"
+
+# Recon mode settings
+if [[ "$MODE" == "--aggressive" ]]; then
+    NMAP_OPTS="-sC -sV -T4 -Pn"
+    RUSTSCAN_OPTS="-u 5000 -- -sC -sV -Pn"
+    NUCLEI_OPTS="-rate-limit 50"
+    NIKTO_RUN=true
+else
+    NMAP_OPTS="-sS -sV -Pn -n -T2"
+    RUSTSCAN_OPTS="-u 3000 -- -sS -Pn -n -T2"
+    NUCLEI_OPTS="-rate-limit 10 -silent"
+    NIKTO_RUN=false
+fi
+
+# Nmap
+echo "[*] Nmap scanning..."
+nmap $NMAP_OPTS -O -oN "$RECON_DIR/nmap.txt" "$TARGET"
+
+# Rustscan
+if command -v rustscan &> /dev/null; then
+    echo "[*] Rustscan..."
+    rustscan -a "$TARGET" $RUSTSCAN_OPTS -oN "$RECON_DIR/rustscan.txt"
+fi
+
+# WhatWeb
+if command -v whatweb &> /dev/null; then
+    echo "[*] WhatWeb fingerprinting..."
+    whatweb --no-errors -v "$TARGET" > "$RECON_DIR/whatweb.txt"
+fi
+
+# Curl Metadata
+echo "[*] Curl metadata pull..."
+curl -s -I "$TARGET" > "$RECON_DIR/http_headers.txt"
+curl -s "$TARGET" | grep -i "<title>" > "$RECON_DIR/title.txt"
+curl -s "$TARGET/robots.txt" > "$RECON_DIR/robots.txt"
+
+# Wappalyzer CLI
+if command -v wappalyzer &> /dev/null; then
+    echo "[*] Wappalyzer CLI..."
+    wappalyzer "$TARGET" > "$RECON_DIR/wappalyzer.json"
+fi
+
+# Nuclei
+if command -v nuclei &> /dev/null; then
+    echo "[*] Nuclei scanning..."
+    nuclei -u "$TARGET" $NUCLEI_OPTS -o "$RECON_DIR/nuclei.txt"
+fi
+
+# Nikto
+if [[ "$NIKTO_RUN" = true && $(command -v nikto) ]]; then
+    echo "[*] Nikto scan..."
+    nikto -h "$TARGET" -output "$RECON_DIR/nikto.txt"
+fi
+
+# Searchsploit
+if command -v searchsploit &> /dev/null; then
+    echo "[*] Searchsploit mapping..."
+    searchsploit --nmap "$RECON_DIR/nmap.txt" > "$RECON_DIR/exploit_suggestions.txt"
+fi
+
+echo "[+] PHASE 1 Complete: Recon saved to $RECON_DIR"
+echo "------------------------------------------------------------"
+
+
+### PHASE 2: SPEAR OF OBSIDIAN (Execute) ###
+echo "[+] PHASE 2: Spear of Obsidian Execution"
+
+PORTS=$(grep -oP '^\d+/tcp\s+open' "$RECON_DIR/nmap.txt" | cut -d/ -f1)
+echo "[*] Open Ports: $PORTS"
+
+# SSH Passive Check
+if echo "$PORTS" | grep -q "22"; then
+    echo "[!] SSH detected (port 22) – passive log only"
+    echo "SSH on $TARGET:22" >> "$EXPLOIT_DIR/passive_notes.txt"
+fi
+
+# SMB Enum
+if echo "$PORTS" | grep -q "445"; then
+    if command -v smbclient &> /dev/null; then
+        smbclient -L //$TARGET -N > "$EXPLOIT_DIR/smb_shares.txt"
+        echo "[+] SMB enum saved to smb_shares.txt"
+    fi
+fi
+
+# HTTP Probes
+if echo "$PORTS" | grep -Eq "80|8080|443"; then
+    curl -s http://$TARGET/admin > "$EXPLOIT_DIR/admin_page.txt"
+    curl -s http://$TARGET/.env > "$EXPLOIT_DIR/env_file.txt"
+    curl -s http://$TARGET/login > "$EXPLOIT_DIR/login_page.txt"
+    echo "[+] HTTP probes completed."
+fi
+
+# SSH Test (Optional)
+read -p "[?] Test SSH login with one username/password? (y/N): " SSH_TEST
+if [[ "$SSH_TEST" == "y" || "$SSH_TEST" == "Y" ]]; then
+    read -p "[+] Username: " SSH_USER
+    read -s -p "[+] Password: " SSH_PASS
+    echo ""
+    timeout 5s sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 "$SSH_USER@$TARGET" 'whoami' > "$EXPLOIT_DIR/ssh_test.txt" 2>/dev/null
+    if [ -s "$EXPLOIT_DIR/ssh_test.txt" ]; then
+        echo "[+] SSH access successful" >> "$EXPLOIT_DIR/passive_notes.txt"
+    else
+        echo "[-] SSH failed" >> "$EXPLOIT_DIR/passive_notes.txt"
+    fi
+fi
+
+echo "[+] PHASE 2 Complete: Exploits saved to $EXPLOIT_DIR"
+echo "------------------------------------------------------------"
+
+
+### PHASE 3: VANISHER OF OBSIDIAN (OS-AWARE) ###
+echo "[+] PHASE 3: Vanisher of Obsidian (OS-Aware Deployment)"
+
+OS_FINGERPRINT=$(grep -i "OS details:" "$RECON_DIR/nmap.txt" | head -n1)
+
+if [[ "$OS_FINGERPRINT" == *"Windows"* ]]; then
+    echo "[*] Target OS Detected: Windows"
+    VANISHER_SRC="./vanish/vanisher_of_obsidian.ps1"
+    VANISHER_DST="$VANISH_DIR/vanisher.ps1"
+
+    if [ -f "$VANISHER_SRC" ]; then
+        cp "$VANISHER_SRC" "$VANISHER_DST"
+        echo "[+] Copied Windows Vanisher to: $VANISHER_DST"
+        echo "[!] Deploy manually post-exploit."
+    else
+        echo "[-] Windows Vanisher not found."
+    fi
+
+elif [[ "$OS_FINGERPRINT" == *"Linux"* || "$OS_FINGERPRINT" == *"Unix"* ]]; then
+    echo "[*] Target OS Detected: Linux/Unix"
+    VANISHER_SRC="./vanish/vanisher_of_obsidian.sh"
+    VANISHER_DST="$VANISH_DIR/vanisher.sh"
+
+    if [ -f "$VANISHER_SRC" ]; then
+        cp "$VANISHER_SRC" "$VANISHER_DST"
+        chmod +x "$VANISHER_DST"
+        echo "[+] Copied Linux Vanisher to: $VANISHER_DST"
+        echo "[!] Deploy manually post-exploit."
+    else
+        echo "[-] Linux Vanisher not found."
+    fi
+
+else
+    echo "[!] OS detection failed or ambiguous."
+    echo "[!] Review Nmap output manually before cleanup."
+fi
+
+echo "------------------------------------------------------------"
+echo "[*] Obsidian Command Chain COMPLETE."
+echo "[*] OpID: $OPID"
+echo "[*] Mission Logs: $BASE_DIR"
+
+### PHASE 4: OBSIDIAN DEBRIEF (After-Action Report) ###
+echo "[+] PHASE 4: Obsidian Debrief – Generating After-Action Report..."
+
+DEBRIEF_DIR="$BASE_DIR/debrief"
+mkdir -p "$DEBRIEF_DIR"
+AAR_FILE="$DEBRIEF_DIR/AAR_${OPID}.md"
+
+# Extract info
+TARGET_TITLE=$(grep -i "<title>" "$RECON_DIR/title.txt" | sed 's/<[^>]*>//g' | xargs)
+HTTP_HEADERS=$(grep -i "Server:\|X-Powered-By:" "$RECON_DIR/http_headers.txt")
+NUCLEI_FINDINGS=$(grep -vE '^\[INF\]' "$RECON_DIR/nuclei.txt" 2>/dev/null)
+SEARCHSPLOIT_RESULTS=$(cat "$RECON_DIR/exploit_suggestions.txt" 2>/dev/null)
+SSH_RESULT=$(cat "$EXPLOIT_DIR/ssh_test.txt" 2>/dev/null)
+SMB_RESULT=$(cat "$EXPLOIT_DIR/smb_shares.txt" 2>/dev/null)
+
+# Begin writing AAR
+cat <<EOF > "$AAR_FILE"
+# Obsidian Debrief – After-Action Report  
+**Operation ID:** $OPID  
+**Target:** $TARGET  
+**Date:** $(date)  
+**Mode:** $MODE  
+
+---
+
+## 1. Executive Summary  
+This report outlines the actions taken by Obsidian Security's red team operators using the OCC framework. The objective was to assess target $TARGET for exploitable weaknesses while operating in ${MODE^^} mode.
+
+---
+
+## 2. Tactics & Timeline
+
+- **Recon Phase (Obsidian Drone):**  
+  Identified services, technologies, and fingerprinted OS.
+
+- **Execution Phase (Spear of Obsidian):**  
+  Probed for exposed panels, attempted service-level access.
+
+- **Vanish Phase (Vanisher of Obsidian):**  
+  OS-detection triggered prep for cleanup scripts based on detected system.
+
+---
+
+## 3. Recon Findings
+
+### Open Services:
+\`\`\`
+$(grep "open" "$RECON_DIR/nmap.txt")
+\`\`\`
+
+### Web Technology Fingerprinting:
+**Page Title:** $TARGET_TITLE  
+**Headers:**
+\`\`\`
+$HTTP_HEADERS
+\`\`\`
+
+### Vulnerabilities Discovered:
+**From Nuclei:**
+\`\`\`
+$NUCLEI_FINDINGS
+\`\`\`
+
+**From SearchSploit (based on Nmap):**
+\`\`\`
+$SEARCHSPLOIT_RESULTS
+\`\`\`
+
+---
+
+## 4. Exploitation Attempts
+
+### SSH Access:
+\`\`\`
+$SSH_RESULT
+\`\`\`
+
+### SMB Enumeration:
+\`\`\`
+$SMB_RESULT
+\`\`\`
+
+### Web Directory Probes:
+- Admin Panel: Found? $(grep -qi 'html' "$EXPLOIT_DIR/admin_page.txt" && echo "Yes" || echo "No")
+- .env File: Found? $(grep -qi '=' "$EXPLOIT_DIR/env_file.txt" && echo "Yes" || echo "No")
+- Login Page: Found? $(grep -qi 'html' "$EXPLOIT_DIR/login_page.txt" && echo "Yes" || echo "No")
+
+---
+
+## 5. Remediation & Recommendations
+
+| Issue | Recommendation |
+|-------|----------------|
+| Unsecured SSH | Disable password auth, use key-based auth, restrict by IP |
+| SMB Shares | Remove null sessions, enforce auth, restrict shares |
+| Exposed admin/.env files | Remove sensitive files from prod, enforce auth on admin panels |
+| Known CVEs (Nuclei/Searchsploit) | Patch services and update packages |
+| Weak headers | Add security headers (CSP, X-Frame-Options, etc.) |
+
+---
+
+## 6. Operator Notes
+
+- Operation performed in **$MODE** mode.
+- No persistent access or malware was deployed.
+- Cleanup tools prepared in: \`$VANISH_DIR\`
+
+---
+
+*End of Report*  
+*Obsidian Security – Precision. Stealth. Power.*
+EOF
+
+echo "[+] AAR generated at: $AAR_FILE"
+echo "------------------------------------------------------------"
+
